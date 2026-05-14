@@ -1,0 +1,14 @@
+---
+title: "Stocks Shiny App Description"
+author: "Cabrina S"
+date: "2026-02-08"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Shiny App Stocks Description
+
+This app lets you explore stock trends for Apple, Amazon, and Google from 2010 to 2022. I included a tool to let the user choose one or all three companies stocks along with prediction bands. The user can also change the accuracy of the prediction and the date range they wish to see. It is interesting to see the dramatic fluctuation of stocks each of these well known companies have.
