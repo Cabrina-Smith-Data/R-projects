@@ -1,0 +1,192 @@
+---
+title: "Insurance Charges"
+subtitle: "Does Geography Matter?"
+author: "Cabrina S."
+date: "`r Sys.Date()`"
+output:
+  ioslides_presentation:
+    widescreen: true
+    smaller: true
+    self_contained: false
+---
+
+## 1. Introduction
+
+When we look at medical insurance premiums, we often wonder if moving to a different part of the country could change our medical premiums (bills).
+
+**Our Investigation:** Today we are using a dataset of 1,338 insurance customers to see if there is a statistically significant relationship between *Region* and *Medical Charges*.
+
+**The Roadmap:**
+
+* Visualize the "Spread of Costs"
+* Define our statistical "Ground Rules"
+* Testing for significant differences using ANOVA
+* Understanding how health factors (BMI/AGE) complicate the story  
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,warning= F,message= F)
+library(readr)
+library(plotly)
+library(ggplot2)
+library(dplyr)
+
+ds <- read.csv("insurance.csv")
+```
+
+## Summary of the data we are using
+
+Before diving into the analysis, we verified the data for 1,338 individuals to ensure there were no illogical extremes, like an age of 200.
+```{r}
+ds %>% select(age, bmi, charges) %>% summary()
+```
+
+## First, Does one region have a higher mean?
+
+
+```{r Outliers_and_NO_Outliers, fig.height=3.5, fig.width=5}
+
+ggplot(ds, aes(x = region, y = charges, fill = region)) +
+  geom_boxplot(alpha = 0.7) +
+  theme_minimal() +
+  labs(title = "Medical Charges by Region~With Outliers",
+       x = "US Region", y = "Charges ($)") +
+  scale_fill_brewer(palette = "Set2")+ 
+  theme(legend.position = "none")
+
+
+ggplot(ds, aes(x = region, y = charges, fill = region)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+  coord_cartesian(ylim = c(0, 20000)) + 
+  theme_minimal() +
+  labs(title = "Medical Charges by Region~Without Outliers",
+       x = "US Region", y = "Charges ($)") +
+  scale_fill_brewer(palette = "Set2") +
+  theme(legend.position = "none")
+
+```
+
+
+A boxplot is the best way to see the "spread" and "outliers" of costs for each region.  
+By removing the outliers in the second graph, we can focus on charges that are under $20,000.  
+We can see that the median costs are actually quite similar, though the Northeast trends slightly higher with the Southeast right behind it.
+
+## Second, Where is the Money?
+
+```{r Density_by_region}
+ggplot(ds, aes(x = region, y = charges, fill = region)) +
+  geom_violin(alpha = 0.5) +
+  geom_jitter(width = 0.1, alpha = 0.1, color="black") +
+  theme_classic() +
+  labs(title = "Distribution of Medical Charges by Region", subtitle = "Wider areas show where most people's costs fall. Southeast shows higher 'peaks'.",
+       x = "US Region", y = "Insurance Charges ($)")+
+  theme(legend.position = "none")
+```
+<br>
+This violin plot shows us where the "density" of people lies.  
+Despite the southeast having a lesser amount of people, the taller point shows that they have a higher density of expensive claims.
+
+
+## The Logic of ANOVA test
+
+To prove that region matters, we can't just look at averages; we have to look at **Variance**. We use a test called **ANOVA**.  
+
+The **F-statistic** is calculated as:
+
+$$F = \frac{\text{Variance between regions}}{\text{Variance within regions}}$$  
+Where:  
+**Variance between regions:** is how much the regional averages differ from each other.  
+**Variance within regions:** is how much the individuals vary within their own region.  
+
+If the variance **between** regions is much larger than the variance **within** them, we conclude that the location has a significant impact on charges.  
+
+
+## Setting Ground Rules
+
+For our conclusions to be reliable, our data must follow three main rules:  
+
+1. **Independence:** One person's bill does not affect anothers.
+2. **Normality:** The variation in our data follows a bell curve:
+   $$\epsilon \sim N(0, \sigma^2)$$
+3. **Equal Variance:** The "spread" of costs is roughly similar across all regions:
+   $$\sigma^2_{NE} \approx \sigma^2_{NW} \approx \sigma^2_{SE} \approx \sigma^2_{SW}$$
+
+If these hold, our $p\text{-value}$ will accurately tell us if Region is a significant factor.
+
+## Test {.smaller}
+
+Now we calculate our p-value. If the p-value is less than 0.05, we reject the idea that all regions are equal.   
+We do that with this code:
+
+```{r ANOVA_test,echo=TRUE,results= 'asis'}
+
+region_model <- aov(charges ~ region, data = ds)
+anova_summary <- summary(region_model)
+
+p_value <- anova_summary[[1]]["region", "Pr(>F)"]
+
+cat("ANOVA Result\n")
+cat(sprintf("**p-value = %.4f**\n\n", p_value))
+```
+
+```{r}
+if (p_value < 0.05) {
+  cat("- **Statistically significant difference between regions**")
+} else {
+  cat("+ **No statistically significant difference between regions**")
+}
+```
+
+## The "Hidden" Variables: Age and BMI
+
+There is a positive linear trend between BMI and medical charges. Most importantly, the trend lines for all four regions are nearly parallel. This tells us that while a region might be slightly more expensive overall, the higher BMI is a better indicator for increased charges.
+
+```{r Age_BMI}
+ggplot(ds, aes(x=bmi, y= charges, color=region))+
+  geom_point(alpha= 0.4)+
+  geom_smooth(method= "lm", se=F)+
+  theme_minimal()+
+  labs(title= "Charges VS. BMI across Regions")
+```
+
+
+## The Big Picture: 3D Interactive Graph Code  
+
+
+Here we have the code for an interactive model that maps 
+* 'Age' on the x-axis
+* 'BMI' on the y-axis
+* 'Chagres ($)' on the z-axis.   
+```{r Age_BMI_byRegn, echo=T, eval=FALSE}
+plot_ly(ds, x = ~age, y = ~bmi, z = ~charges, 
+        color = ~region, colors = "Set1",
+        type = "scatter3d", mode = "markers", marker = list(size = 3)) %>%
+  layout(title = "The Complexity of Costs",
+         scene = list(xaxis = list(title = 'Age'),
+                      yaxis = list(title = 'BMI'),
+                      zaxis = list(title = 'Charges ($)')))
+```
+
+## The Big Picture: 3D Interactive Graph
+
+```{r Age_BMI_Charge_graph}
+plot_ly(ds, x = ~age, y = ~bmi, z = ~charges, 
+        color = ~region, colors = "Set1",
+        type = "scatter3d", mode = "markers", marker = list(size = 3)) %>%
+  layout(title = "The Complexity of Costs",
+         scene = list(xaxis = list(title = 'Age'),
+                      yaxis = list(title = 'BMI'),
+                      zaxis = list(title = 'Charges ($)')))
+```
+Costs aren't just about region; they are driven by health. Here we see how Age and BMI drive Charges, colored by Region.
+
+## Final Verdict: Does Region Matter?
+
+### **The Findings:**
+Our ANOVA test (Slide 5) typically shoes a low p-value, meaning region *does* influence cost.  
+The Southeast region often has the highest average charges.  
+<br>
+**The 'But':**  
+While geography matters, our 3D and BMI plot shows that *Age & BMI* create the largest cost differences.  
+<br>
+**Conclusion:** Where you live matters for your insurance bill, but who you are and your health lifestyle matter more.
