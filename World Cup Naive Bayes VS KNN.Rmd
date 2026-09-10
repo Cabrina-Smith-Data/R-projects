@@ -1,0 +1,324 @@
+---
+title: "FIFA: Separating the Contenders from the Pretenders"
+subtitle: "Using Machine Learning to Classify Elite FIFA Squads on the Eve of the World Cup"
+author: "Cabrina S"
+date: "2026-06-18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, fig.width=8, fig.height =5)
+
+```
+
+## Introduction
+Every four years, the entire planet stops to watch the FIFA World Cup. Billions of fans tune in, arguing over brackets, dark horses, and statistical projections. But underneath all the stadium atmosphere lies a massive data problem: How can we mathematically tell who is actually a realistic contender to win it all, versus who just got lucky on their way there?
+
+To answer this, we are looking at the historical FIFA Men's International Rankings dataset that we aquired from Kaggle.com:
+
+https://www.kaggle.com/datasets/tadhgfitzgerald/fifa-international-soccer-mens-ranking-1993now
+
+Our core objective is to build a binary classifier that takes team performance metrics right before a World Cup kicks off and accurately determines whether a squad belongs to the true elite—the "Top 30 Tier." Why the Top 30? Because history shows that World Cup champions, finalists, and deep-run underdogs almost exclusively emerge from this upper class of international football.
+
+We are starting off with an independent variable based Naive Bayes, then moving on to a distance-based champion—K-Nearest Neighbors (KNN)—and utilizing cross-validation to rigorously tune our parameters. By comparing a probability-based model against a space-density model, we want to figure out which algorithm handles the chaotic, high-stakes of international football data best.
+
+## Setting up for Success
+
+Before we can look at the data, we need to load our tools. We are using tidyverse for cleaning and manipulating our tables, e1071 for running our Naive Bayes baseline, class to build our KNN models, and pROC to plot advanced performance metrics.
+
+```{r}
+library(tidyverse)
+library(class) # for KNN
+library(e1071) # for Naive Bayes
+library(pROC) # for ROC & AUC curves
+```
+
+## Data Wrangling & Manipulation
+
+Our raw data set contains decades of rankings. However, if we just blindly throw all this data into a machine learning model, our results will break. Why? Because in 2006, FIFA fundamentally changed how they calculated ranking points. Before 2006, points were in double or triple digits; after 2006, they jumped into the thousands.
+
+To bypass this structural trap and capture a clean, standardized environment, we are extracting data from five specific snapshot dates right on the eve of major World Cup tournaments (1998, 2002, 2006, 2010, and 2014). This ensures every row represents a team standing exactly at the starting line of a World Cup.
+
+We will drop text labels like country names for our models, define our binary target variable (TopTier = 1 if a team is ranked 30 or better, 0 otherwise), and keep clean numeric features: total_points, previous_points, and rank_change.
+
+```{r}
+# uploading raw data file
+fifa_data <- read.csv("fifa_ranking.csv", stringsAsFactors = FALSE)
+
+# Define the World Cup years we are looking at
+target_dates <- c('1998-05-20', '2002-05-15', '2006-05-17', '2010-05-26', '2014-05-08')
+
+# Clean, transform, and subset data
+fifa_clean <- fifa_data %>%
+  filter(rank_date %in% target_dates) %>%
+  filter(!is.na(total_points)) %>%
+  mutate(
+    TopTier = as.factor(ifelse(rank <= 30, 1, 0))
+  ) %>%
+  select(TopTier, total_points, previous_points, rank_change, country_full, rank_date)
+
+# Create a clean dataframe by selecting needs
+fifa_model_data <- fifa_clean %>% select(TopTier, total_points, previous_points, rank_change)
+
+# Quick look at our target variables (1=top tier, 0= all others)
+table(fifa_model_data$TopTier)
+```
+Looking at the output, we have 866 teams in the lower tier and 151 teams in our elite group.
+
+This instantly shows us a massive class imbalance, where only about 15% of our observations belong to the top class. This distribution makes complete sense for our problem—by definition, true elite contenders should be rare. However, it is an important piece of context to keep in mind. If an algorithm were to just blindly guess "0" for every single team on the eve of a tournament, it would automatically be right 85% of the time. This tells us that standard accuracy might lie to us later on, and we will need to dig deeper into how our models actually separate these groups rather than just looking at overall scores.
+
+
+### Visulaizing the "Top Tier"
+
+Before making predictions, we need to look at the patterns in our data. Let's create two visualization pieces to show how our "Top Tier" teams stand out from the rest of the pack.
+
+#### *Separation of Power - Scatter Plot*
+
+This scatter plot maps out total_points against previous_points. We want to see if our target variable (Top Tier) naturally clusters together or spreads out chaotically.
+```{r}
+ggplot(fifa_clean, aes(x = previous_points, y = total_points, color = TopTier)) +
+  geom_point(alpha = 0.7, size = 2) +
+  scale_color_manual(values = c("lightblue", "darkorange"), labels = c("Lower Tier (Rank 31+)", "Top Tier (Rank 1-30)")) +
+  labs(title = "FIFA Points Distribution on World Cup Eves",
+       x = "Previous Ranking Points",
+       y = "Current Total Points",
+       color = "Squad Status") +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 14))
+```
+
+Looking at the scatter plot, we can see a clear, tight linear pattern running right up the diagonal where a team’s current total points perfectly track their previous points. This makes total sense when you think about how international rankings work—teams don't completely reset overnight; their score today is heavily built on what they did yesterday.
+
+What is really interesting for our classification outcome is how the groups split. The orange dots, representing our elite "Top Tier" teams, are exclusively grouped at the top-right corner of the plot. There is no chaotic mixing where a team with low points suddenly sneaks into the top tier right before a World Cup.
+
+However, right where the orange and blue dots meet, the boundary line gets a bit fuzzy. There is a small pocket of overlap where teams have very similar point totals but end up on different sides of that Rank 30 cutoff line. This tells us that while total points will definitely be our strongest predictor, a simple, rigid rule might struggle right at the edge. This provides great justification for why we need to move past simple baseline logic and use machine learning models like Naive Bayes and KNN to navigate that boundary line.
+
+#### *Volatility of Success - Box Plot*
+
+Let's see how much momentum matters. Does a dramatic jump or fall in rankings (rank_change) vary significantly between Top-Tier teams and the rest of the world?
+
+```{r}
+# Boxplot - Rank Change volatility (by Tier)
+ggplot(fifa_clean, aes(x = factor(TopTier, labels = c("Lower Tier (31+)", "Top Tier (1-30)")), 
+                       y = rank_change, 
+                       fill = TopTier)) +
+  #  individual points
+  geom_boxplot(alpha = 0.7, outlier.color = "red", width = 0.5) +
+  #  added insight
+  geom_jitter(width = 0.2, alpha = 0.4) + 
+  
+  scale_fill_manual(values = c("lightblue", "darkorange"), labels = c("Lower Tier", "Top Tier")) +
+  
+  labs(title = "Comparing Rank Volatility (Recent Change) by Team Tier",
+       subtitle = "A boxplot to visualize if Top Tier status implies ranking stability.",
+       x = "FIFA Team Classification",
+       y = "Recent Position Shifts (Rank Change)") +
+  
+
+  theme_minimal() +
+  theme(legend.position = "none", 
+        plot.title = element_text(face = "bold", size = 14),
+        plot.subtitle = element_text(size = 11, face = "italic"))
+```
+
+Looking at this boxplot, we can see a clear split in how teams experience rank fluctuations based on their tier status.
+
+The most striking feature here isn't the box dimensions themselves—which are actually fairly similar in height—but where they sit on the vertical axis and how the underlying data points spread out. The light blue box for our lower-tier teams sits entirely below the zero line, indicating that the baseline trend for these squads is a net loss in rank positions leading up to a tournament. In contrast, the orange box for our elite teams sits comfortably above the zero line, showing that top-tier teams typically maintain positive ranking momentum.
+
+When we look at the individual data points scattered across the boxes, the real structural difference jumps out.This shows that the lower tier is highly volatile; teams down there experience dramatic, unpredictable surges and crashes in standing.
+
+## Partitioning & Scaling the Data
+
+To keep our test completely fair and prevent our models from "memorizing" the answers, we split our data: 70% goes into a training set for the models to learn from, and 30% is hidden away as an out-of-sample test set.
+
+Because KNN calculates distances between data points, features with large scales (like points) will completely drown out smaller scales (like rank changes). To prevent this, we scale our features so they all stand on equal footing.
+
+```{r}
+set.seed(42) # for reproducibility
+
+# Create rows index split
+train_idx <- sample(1:nrow(fifa_model_data), 0.70 * nrow(fifa_model_data))
+
+train_set <- fifa_model_data[train_idx, ]
+test_set  <- fifa_model_data[-train_idx, ]
+
+# Separate features - KNN scaling
+X_train_raw <- train_set %>% select(-TopTier)
+X_test_raw  <- test_set %>% select(-TopTier)
+
+# Scale based on training parameters
+X_train <- scale(X_train_raw)
+X_test  <- scale(X_test_raw, 
+                 center = attr(X_train, "scaled:center"), 
+                 scale = attr(X_train, "scaled:scale"))
+
+y_train <- train_set$TopTier
+y_test  <- test_set$TopTier
+```
+
+## Naive Bayes Baseline
+
+Our first model is Naive Bayes. It assumes that every feature is completely independent of the others and calculates probabilities. We train it on our training partition, grab its predictions on our unseen test set, and extract the raw probabilities so we can build an ROC curve later.
+
+```{r Naive Bayes}
+# Train the model
+nb_model <- naiveBayes(TopTier ~ ., data = train_set)
+
+# Generate probabilities (elite category 1)
+nb_preds_prob <- predict(nb_model, test_set, type = "raw")[, 2]
+nb_preds_class <- predict(nb_model, test_set, type = "class")
+
+# Check performance
+table(Predicted = nb_preds_class, Actual = y_test)
+```
+
+Looking at our matrix, we can see exactly how the baseline Naive Bayes model handles our unseen test data. Out of 257 actual lower-tier teams (class 0), it correctly predicts 241 of them, only missing 16. When it comes to our elite teams (class 1), it correctly captures 24 out of 49, missing 25.
+
+What this tells us in plain terms is that the model is quite conservative. It does a great job of keeping "pretenders" out of the elite class, giving us a low false positive rate (only 16 teams were accidentally hyped up as top tier when they didn't belong). The trade-off is that it suffers from a higher number of false negatives, completely missing 25 genuine top-30 squads by labeling them as lower tier.It proves our data points have a strong signal, and it gives us a clear benchmark to see if our spatial KNN model can navigate that tricky boundary layer any better.
+
+## K Nearest Neighbors & Hyperparameter Tuning
+
+Unlike Naive Bayes, K-Nearest Neighbors doesn't look at overall probabilities. Instead, it places an unknown team into our multi-dimensional space, looks at the $K$ closest neighbors, and takes a majority vote.
+
+But how do we choose $K$? If $K$ is too small (like $K=1$), the model overfits and reacts to noise. If $K$ is too large, it underfits and misses the boundary. To solve this, we will use a 5-Fold Cross Validation routine within our training set to test an assortment of odd numbers for $K$ and find the sweet spot.
+
+
+## Bias-Variance Tradeoff
+
+Let's track how different choices of $K$ alter our accuracy across our cross-validation folds.
+
+```{r K and Accuracy}
+set.seed(42) # for reproducibility
+k_values <- seq(1, 25, by = 2)
+cv_accuracies <- numeric(length(k_values))
+
+# Set up folds
+folds <- cut(seq(1, nrow(train_set)), breaks = 5, labels = FALSE)
+folds_idx <- sample(folds)
+
+for(i in seq_along(k_values)) {
+  k_val <- k_values[i]
+  fold_accs <- numeric(5)
+  
+  for(f in 1:5) {
+    val_idx <- which(folds_idx == f)
+    cv_train_X <- scale(train_set[-val_idx, ] %>% select(-TopTier))
+    cv_val_X   <- scale(train_set[val_idx, ] %>% select(-TopTier), 
+                        center = attr(cv_train_X, "scaled:center"), 
+                        scale = attr(cv_train_X, "scaled:scale"))
+    
+    cv_knn_pred <- knn(train = cv_train_X, test = cv_val_X, 
+                       cl = train_set$TopTier[-val_idx], k = k_val)
+    fold_accs[f] <- mean(cv_knn_pred == train_set$TopTier[val_idx])
+  }
+  cv_accuracies[i] <- mean(fold_accs)
+}
+
+# Plot tuning curve
+tuning_df <- data.frame(K = k_values, Accuracy = cv_accuracies)
+ggplot(tuning_df, aes(x = K, y = Accuracy)) +
+  geom_line(color = "purple", size = 1) +
+  geom_point(color = "darkorange", size = 3) +
+  labs(title = "KNN Hyperparameter Tuning via 5-Fold Cross Validation",
+       x = "Number of Neighbors (K)",
+       y = "Cross-Validated Classification Accuracy") +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 14))
+
+# Utalize best K parameter
+best_k <- k_values[which.max(cv_accuracies)]
+
+best_k
+```
+
+Looking at our tuning curve output, the cross-validation algorithm searches through our range of odd neighborhood sizes and determines that $K = 7$ maximizes our validation classification accuracy.
+
+It is worth noting that because our cross-validation relies on a random partition of folds, the optimal neighbor count can naturally fluctuate between values like 3, 5, or 7 depending on how the teams shuffle into training groups. This behavior is a great demonstration of the bias-variance trade off in action. When $K$ is set too low (like $K = 1$), the model is highly sensitive to individual noise in whichever specific teams happened to land in that cross-validation fold (high variance). On the other hand, as $K$ pushes past 7 and heads toward 25, we see the accuracy drop off because a massive voting pool introduces too much bias—it forces the model to average in irrelevant, lower-tier teams, which blurs our class boundaries.
+
+By anchoring our code with a fixed seed, at 42 in our case, we find that a neighborhood size of 7 provides the optimal mathematical sweet spot for this data. It is large enough to smooth out erratic fluctuations but tight enough to preserve the distinct spatial characteristics of elite contenders. Now that we have locked in this optimal parameter, we can let our tuned model vote on our unseen test set.
+
+```{r k on Test set}
+# Tuned KNN prediction
+knn_preds_class <- knn(train = X_train, test = X_test, cl = y_train, k = best_k)
+
+# classification matrix
+table(Predicted = knn_preds_class, Actual = y_test)
+```
+Looking at our tuned KNN matrix, the performance jump over our baseline model is immediately obvious. Out of 257 actual lower-tier teams, it correctly flags 250 of them, only letting 7 "pretenders" slip through into the elite category. More importantly, when it comes to finding our elite teams, it correctly captures 41 out of 49 contenders, only missing 8.
+
+Comparing this directly to our Naive Bayes baseline shows us the clear power of a spatial model. By looking at localized neighborhoods rather than assuming everything is completely independent, the KNN model aggressively slashed our errors. It dropped our missed elite teams from 25 down to just 8, meaning it successfully caught the vast majority of our actual World Cup Elites. Even more impressive is how it tightened up on the lower-tier teams, dropping our false positives from 16 down to just 7. This tells us that team data right before a tournament naturally groups together in tight, distinct physical clusters. By setting our neighborhood size to a balanced $K = 7$, our model successfully isolated those spatial clusters, giving us an incredibly sharp tool for finding the true international contenders.
+
+## Head to Head Comparison
+
+Standard accuracy can lie, especially when dealing with top-tier slots where most entries belong to the lower tier. To truly compare our models, we will plot an ROC (Receiver Operating Characteristic) Curve and measure the AUC (Area Under the Curve). A perfect model scores a 1.0, while a random guessing model scores a 0.5.
+
+### ROC Curve (Reviver Operating Cahrateristic)
+
+Let's overlay our models' performance paths to see who reigns supreme at isolating elite team status.
+
+```{r}
+# ROC for Naive Bayes
+roc_nb <- roc(y_test, nb_preds_prob)
+
+# For KNN ROC: probabilities
+knn_prob_model <- knn(train = X_train, test = X_test, cl = y_train, k = best_k, prob = TRUE)
+knn_probs <- attr(knn_prob_model, "prob")
+
+# knn = proportion of WINNING class(1)
+knn_preds_prob <- ifelse(knn_prob_model == "1", knn_probs, 1 - knn_probs)
+roc_knn <- roc(y_test, knn_preds_prob)
+
+# Plot performance curves
+plot(roc_nb, col = "darkorange", lwd = 3, main = "Out-of-Sample ROC Curve Comparison")
+plot(roc_knn, col = "purple", lwd = 3, add = TRUE) # Overlays the KNN line
+abline(a = 0, b = 1, lty = 2, col = "grey")
+
+legend("bottomright", 
+       legend = c(paste("Naive Bayes (AUC =", round(auc(roc_nb), 3), ")"),
+                  paste("KNN (AUC =", round(auc(roc_knn), 3), ")")),
+       col = c("darkorange", "purple"), lwd = 3)
+```
+
+Looking at our overlayed ROC plot, we have a clear visual and mathematical confirmation of which model reigns supreme. While our baseline Naive Bayes model put up a highly respectable fight with an Area Under the Curve (AUC) of 0.867, our tuned K-Nearest Neighbors model decisively dominates the chart with a stellar AUC of 0.973.
+
+Visually, we can see this dominance in how the purple KNN curve aggressively hugs the top-left corner of the plot. That vertical surge means the model achieves a significantly higher sensitivity (correctly identifying our actual elite contenders) much faster, without having to pay a heavy penalty in specificity (accidentally letting lower-tier teams slip in).
+
+This performance gap comes down to how these two algorithms treat our feature space. Naive Bayes operates under the strict assumption that variables like current points and recent rank shifts are completely independent factors. In reality, international football rankings are highly interconnected and momentum-driven. 
+
+By abandoning rigid probabilistic assumptions and instead mapping the local, physical proximity of teams with $K = 7$, KNN naturally accommodates these relationships. The massive 0.973 AUC proves that elite international football teams are best identified not by independent probabilities, but by the company they keep in the global standings right on the eve of the tournament.
+
+### Who does the Model Trust?
+
+Let's test our model's real-world predictions. By merging our model's calculations back with our team metadata, we can look at the out-of-sample leader board to see which historical teams our machine learning model flagged with the absolute highest probability of elite contender status.
+
+```{r teams w/ highest probability}
+# leader board
+test_results <- test_set %>%
+  mutate(
+    Country = fifa_clean$country_full[-train_idx],
+    Tournament_Eve = fifa_clean$rank_date[-train_idx],
+    Model_Contender_Probability = nb_preds_prob
+  ) %>%
+  arrange(desc(Model_Contender_Probability)) %>%
+  select(Country, Tournament_Eve, total_points, Model_Contender_Probability)
+
+# top 10 most confident elite teams by model
+knitr::kable(head(test_results, 10), digits = 3, caption = "Top 10 Most Certain Elite Contenders Identified by Model")
+```
+
+Looking at our real-world leaderboard, we can see exactly who the model places its absolute confidence in. The table pulls a snapshot from the eve of the 2014 World Cup, listing the top ten teams that the algorithm flags with a maximum contender probability of 1.000.
+
+Historically, this list aligns beautifully with reality. Heavyweights like Spain (the defending World Cup and European champions at the time), Argentina, and Uruguay sit comfortably at the top with massive four-digit point totals. However, what makes this leaderboard a fantastic diagnostic check is looking at the bottom of the top ten. Even a team like Scotland—which had a much lower total point score of 824.73 compared to Spain's 1460.44—is given a perfect 1.000 probability score.
+
+This happens because the model has learned that despite a lower raw score, these teams still sit comfortably on the right side of the structural 2006 FIFA points shift. Because their features place them far away from the historical pre-2006 double-digit data, the model can say with absolute mathematical certainty that these squads belong to the modern elite era, leaving zero doubt that they are true top-tier contenders entering the tournament.
+
+## Conclusion
+
+By expanding our analytical toolkit, we can draw some clear conclusions about our data structure and model physics:
+
+- Model Comparison: Our baseline Naive Bayes model serves as a highly resilient probability classifier. It uses fixed, independent probabilistic assumptions, giving it higher structural bias but making it a very solid baseline. It operates smoothly and conservatively, ensuring that "pretenders" are kept out of the elite category.
+
+- The Power of KNN: K-Nearest Neighbors takes a spatial approach. It makes zero starting assumptions about our data shapes, allowing it to adapt dynamically to the true distributions. By anchoring our random shuffles with set.seed(42) and utilizing 5-fold cross-validation, we successfully optimized our hyperparameter to $K = 7$. This tuned spatial model completely outmatched our baseline, aggressively slashing both false negatives and false positives on the test set and achieving a stellar AUC of 0.973 on our overlayed ROC curve.
+
+- The Practical Catch: While our spatial model is exceptionally accurate at finding "Top Tier" status on the eve of a tournament, we must remember our analytical boundary: classifying an elite squad is not the exact same thing as predicting a World Cup winner. A team can possess flawless points, stable ranking trends, and a near-perfect probability of elite tier placement, but a single penalty shootout miss or an unexpected injury can end their tournament run instantly. What we have built isn't a crystal ball for stadium luck—it is a robust classifier that successfully separates the true international heavyweights from the rest of the world.
